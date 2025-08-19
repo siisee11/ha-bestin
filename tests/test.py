@@ -465,24 +465,42 @@ class DevicePacketParser:
 
 
 if __name__ == "__main__":
-    comm = Communicator("192.168.219.101:8899")
+    comm = Communicator("192.168.219.102:8899")
     comm.connect()
 
     while True:
         receive = comm.receive()
         packets = PacketParser.parse(receive)
         for packet in packets:
+            # Always print packet header
+            print("\n" + "="*60)
+            
+            # Determine packet type string
+            packet_type_str = packet.packet_type.value.upper() if packet.packet_type else "UNKNOWN"
+            device_type_str = packet.device_type.value.upper() if packet.device_type else "UNKNOWN"
+            
+            # Print packet info
+            print(f"[{device_type_str}] {packet_type_str} Packet | Seq: {packet.seq_number} | Valid: {packet.is_valid}")
+            print("-"*60)
+            print("RAW: " + ' '.join(f'{byte:02X}' for byte in packet.data))
+            print("-"*60)
+            
+            # Try to parse only response packets
             if packet.packet_type == PacketType.RES:
                 parse_data = DevicePacketParser(packet).parse()
                 if parse_data is not None:
-                    print("\n" + "="*60)
-                    print(f"[{packet.device_type.value.upper()}] Response Packet")
-                    print("-"*60)
-                    print("RAW: " + ' '.join(f'{byte:02X}' for byte in packet.data))
-                    print("-"*60)
                     if isinstance(parse_data, list):
                         for idx, item in enumerate(parse_data, 1):
                             print(f"  [{idx}] {item}")
                     else:
                         print(f"  {parse_data}")
-                    print("="*60)
+                else:
+                    print("  [Parsing failed - Unknown format]")
+            elif packet.packet_type == PacketType.QUERY:
+                print("  [Query packet - No data to parse]")
+            elif packet.packet_type == PacketType.ACK:
+                print("  [Acknowledgment packet]")
+            else:
+                print("  [Unknown packet type]")
+            
+            print("="*60)
