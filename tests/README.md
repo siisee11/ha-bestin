@@ -355,7 +355,7 @@ def checksum(self, data):
 ```python
 if __name__ == "__main__":
     # 클라이언트 생성 및 연결
-    client = SocketClient('192.168.0.27', 8899)
+    client = SocketClient('192.168.219.101', 8899)
     client.connect()
     
     # 실시간 모니터링 시작

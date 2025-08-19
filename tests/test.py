@@ -170,7 +170,11 @@ class DevicePacket:
 
     def __str__(self) -> str:
         """Return a string representation of the device packet."""
-        return f"Key: {self.trans_key}, Room: {self.room_id}, Sub: {self.sub_id}, State: {self.device_state}"
+        if isinstance(self.device_state, dict):
+            state_str = ", ".join([f"{k}: {v}" for k, v in self.device_state.items()])
+            return f"Room {self.room_id} | {self.trans_key} | {state_str}"
+        else:
+            return f"Room {self.room_id} | {self.trans_key} | State: {self.device_state}"
     
 class PacketParser:
     """"Class to parse packets."""
@@ -461,7 +465,7 @@ class DevicePacketParser:
 
 
 if __name__ == "__main__":
-    comm = Communicator(":8899")
+    comm = Communicator("192.168.219.101:8899")
     comm.connect()
 
     while True:
@@ -471,5 +475,14 @@ if __name__ == "__main__":
             if packet.packet_type == PacketType.RES:
                 parse_data = DevicePacketParser(packet).parse()
                 if parse_data is not None:
-                    #print(' '.join(f'{byte:02X}' for byte in packet.data))
-                    print(parse_data)
+                    print("\n" + "="*60)
+                    print(f"[{packet.device_type.value.upper()}] Response Packet")
+                    print("-"*60)
+                    print("RAW: " + ' '.join(f'{byte:02X}' for byte in packet.data))
+                    print("-"*60)
+                    if isinstance(parse_data, list):
+                        for idx, item in enumerate(parse_data, 1):
+                            print(f"  [{idx}] {item}")
+                    else:
+                        print(f"  {parse_data}")
+                    print("="*60)
