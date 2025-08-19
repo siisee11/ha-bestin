@@ -1198,3 +1198,549 @@ HEADER_BYTES[0xXX] = "new_device_type"
 - 예제 추가
 
 ---
+
+## 📖 How-To: 실시간 패킷 분석 가이드
+
+### 실시간 패킷 수신 및 분석 설정
+
+#### Step 1: 연결 방식 확인
+
+먼저 월패드와의 연결 방식을 확인합니다.
+
+```python
+# 1. 소켓 연결 (이더넷/WiFi 월패드)
+CONNECTION_STRING = "192.168.0.27:8899"  # IP:PORT
+
+# 2. 시리얼 연결 (RS485 직접 연결)
+CONNECTION_STRING = "COM3"              # Windows
+CONNECTION_STRING = "/dev/ttyUSB0"     # Linux
+CONNECTION_STRING = "/dev/tty.usbserial-1410"  # macOS
+```
+
+#### Step 2: 기본 실시간 모니터링
+
+가장 간단한 방법은 `test.py`를 직접 실행하는 것입니다.
+
+```bash
+# test.py 파일 수정
+# 476번째 줄의 conn_str 변경
+comm = Communicator("192.168.0.27:8899")  # 자신의 연결 정보로 변경
+
+# 실행
+python test.py
+```
+
+#### Step 3: 커스텀 실시간 분석 스크립트
+
+특정 패킷만 모니터링하고 싶다면 다음과 같은 스크립트를 작성합니다.
+
+```python
+# realtime_monitor.py
+import asyncio
+import logging
+from datetime import datetime
+from test import Communicator, PacketParser, DevicePacketParser
+
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    handlers=[
+        logging.FileHandler('packets.log'),
+        logging.StreamHandler()
+    ]
+)
+
+class RealtimePacketAnalyzer:
+    def __init__(self, connection_string):
+        self.comm = Communicator(connection_string)
+        self.packet_buffer = []
+        self.stats = {}
+        
+    async def start(self):
+        """실시간 모니터링 시작"""
+        self.comm.connect()
+        print(f"Connected to {self.comm.conn_str}")
+        print("Monitoring packets... (Press Ctrl+C to stop)")
+        print("-" * 50)
+        
+        while True:
+            try:
+                # 패킷 수신
+                raw_data = self.comm.receive()
+                if not raw_data:
+                    await asyncio.sleep(0.01)
+                    continue
+                
+                # 패킷 파싱
+                packets = PacketParser.parse(raw_data)
+                
+                for packet in packets:
+                    await self.process_packet(packet)
+                    
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                logging.error(f"Error: {e}")
+                
+        self.print_statistics()
+        
+    async def process_packet(self, packet):
+        """개별 패킷 처리"""
+        # 1. 로우 패킷 로깅
+        hex_str = ' '.join(f'{b:02X}' for b in packet.data)
+        logging.debug(f"RAW: {hex_str}")
+        
+        # 2. 체크섬 검증
+        if not packet.is_valid:
+            logging.warning(f"Invalid checksum: {hex_str}")
+            return
+            
+        # 3. 디바이스별 파싱
+        device_data = DevicePacketParser(packet).parse()
+        if not device_data:
+            return
+            
+        # 4. 디바이스 타입별 처리
+        device_type = packet.device_type.value
+        await self.handle_device_data(device_type, device_data)
+        
+        # 5. 통계 업데이트
+        self.update_statistics(device_type)
+        
+    async def handle_device_data(self, device_type, data):
+        """디바이스 타입별 데이터 처리"""
+        
+        if device_type == "thermostat":
+            # 난방 데이터 처리
+            room_id = data.room_id
+            state = data.device_state
+            print(f"🌡️  난방 [{room_id}호]: "
+                  f"{'ON' if state['state'] else 'OFF'}, "
+                  f"설정: {state['set_temp']}°C, "
+                  f"현재: {state['cur_temp']}°C")
+                  
+        elif device_type == "light":
+            # 조명 데이터 처리
+            print(f"💡 조명 [{data.room_id}]: {data.device_state}")
+            
+        elif device_type == "fan":
+            # 환기 데이터 처리
+            state = data.device_state
+            print(f"🌀 환기: "
+                  f"{'ON' if state['state'] else 'OFF'}, "
+                  f"속도: {state.get('wind_speed', 0)}")
+                  
+        elif device_type == "energy":
+            # 에너지 데이터 처리
+            print(f"⚡ 에너지 [{data.room_id}]: "
+                  f"실시간: {data.device_state['realtime_usage']}W")
+                  
+    def update_statistics(self, device_type):
+        """통계 업데이트"""
+        self.stats[device_type] = self.stats.get(device_type, 0) + 1
+        
+        # 100개마다 통계 출력
+        total = sum(self.stats.values())
+        if total % 100 == 0:
+            self.print_statistics()
+            
+    def print_statistics(self):
+        """통계 출력"""
+        print("\n" + "=" * 50)
+        print("📊 패킷 통계:")
+        for device, count in self.stats.items():
+            print(f"  {device}: {count}개")
+        print("=" * 50 + "\n")
+
+# 실행
+if __name__ == "__main__":
+    analyzer = RealtimePacketAnalyzer("192.168.0.27:8899")
+    asyncio.run(analyzer.start())
+```
+
+#### Step 4: 특정 디바이스만 모니터링
+
+특정 디바이스 타입만 모니터링하려면 필터를 추가합니다.
+
+```python
+# filter_monitor.py
+class FilteredMonitor(RealtimePacketAnalyzer):
+    def __init__(self, connection_string, device_filter=None):
+        super().__init__(connection_string)
+        self.device_filter = device_filter or []
+        
+    async def process_packet(self, packet):
+        """필터링된 패킷만 처리"""
+        device_type = packet.device_type.value
+        
+        # 필터 적용
+        if self.device_filter and device_type not in self.device_filter:
+            return
+            
+        await super().process_packet(packet)
+
+# 난방과 에너지만 모니터링
+monitor = FilteredMonitor(
+    "192.168.0.27:8899",
+    device_filter=["thermostat", "energy"]
+)
+asyncio.run(monitor.start())
+```
+
+#### Step 5: 패킷 덤프 및 재생
+
+실시간 패킷을 저장하고 나중에 재생하여 분석할 수 있습니다.
+
+```python
+# packet_recorder.py
+import pickle
+import time
+
+class PacketRecorder:
+    def __init__(self, connection_string):
+        self.comm = Communicator(connection_string)
+        self.recordings = []
+        
+    def record(self, duration=60):
+        """지정된 시간 동안 패킷 녹화"""
+        self.comm.connect()
+        start_time = time.time()
+        
+        print(f"Recording for {duration} seconds...")
+        
+        while time.time() - start_time < duration:
+            raw_data = self.comm.receive()
+            if raw_data:
+                self.recordings.append({
+                    'timestamp': time.time(),
+                    'data': raw_data
+                })
+                
+        # 저장
+        filename = f"packets_{int(start_time)}.pkl"
+        with open(filename, 'wb') as f:
+            pickle.dump(self.recordings, f)
+            
+        print(f"Saved {len(self.recordings)} packets to {filename}")
+        return filename
+        
+    @staticmethod
+    def replay(filename):
+        """저장된 패킷 재생"""
+        with open(filename, 'rb') as f:
+            recordings = pickle.load(f)
+            
+        print(f"Replaying {len(recordings)} packets...")
+        
+        for record in recordings:
+            packets = PacketParser.parse(record['data'])
+            for packet in packets:
+                device_data = DevicePacketParser(packet).parse()
+                if device_data:
+                    print(f"[{record['timestamp']}] {device_data}")
+
+# 녹화
+recorder = PacketRecorder("192.168.0.27:8899")
+filename = recorder.record(duration=30)
+
+# 재생
+PacketRecorder.replay(filename)
+```
+
+#### Step 6: 실시간 그래프 시각화
+
+matplotlib를 사용하여 실시간 데이터를 시각화할 수 있습니다.
+
+```python
+# realtime_graph.py
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from collections import deque
+import numpy as np
+
+class RealtimeGraphMonitor:
+    def __init__(self, connection_string):
+        self.comm = Communicator(connection_string)
+        self.temp_data = deque(maxlen=100)
+        self.power_data = deque(maxlen=100)
+        self.timestamps = deque(maxlen=100)
+        
+        # 그래프 설정
+        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1)
+        self.ax1.set_title('실시간 온도')
+        self.ax1.set_ylabel('온도 (°C)')
+        self.ax2.set_title('실시간 전력 사용량')
+        self.ax2.set_ylabel('전력 (W)')
+        self.ax2.set_xlabel('시간')
+        
+    def update_graph(self, frame):
+        """그래프 업데이트"""
+        # 패킷 수신
+        raw_data = self.comm.receive()
+        if not raw_data:
+            return
+            
+        packets = PacketParser.parse(raw_data)
+        
+        for packet in packets:
+            device_data = DevicePacketParser(packet).parse()
+            if not device_data:
+                continue
+                
+            # 온도 데이터
+            if packet.device_type.value == "thermostat":
+                temp = device_data.device_state.get('cur_temp', 0)
+                self.temp_data.append(temp)
+                
+            # 전력 데이터
+            elif packet.device_type.value == "energy":
+                power = device_data.device_state.get('realtime_usage', 0)
+                self.power_data.append(power)
+                
+        # 그래프 그리기
+        if self.temp_data:
+            self.ax1.clear()
+            self.ax1.plot(list(self.temp_data))
+            self.ax1.set_ylim([15, 35])
+            
+        if self.power_data:
+            self.ax2.clear()
+            self.ax2.plot(list(self.power_data))
+            
+    def start(self):
+        """실시간 그래프 시작"""
+        self.comm.connect()
+        ani = FuncAnimation(self.fig, self.update_graph, interval=1000)
+        plt.show()
+
+# 실행
+monitor = RealtimeGraphMonitor("192.168.0.27:8899")
+monitor.start()
+```
+
+#### Step 7: 패킷 패턴 분석
+
+새로운 디바이스나 명령을 분석할 때 사용합니다.
+
+```python
+# pattern_analyzer.py
+class PatternAnalyzer:
+    def __init__(self, connection_string):
+        self.comm = Communicator(connection_string)
+        self.patterns = {}
+        
+    def analyze(self, duration=60):
+        """패킷 패턴 분석"""
+        self.comm.connect()
+        start_time = time.time()
+        
+        while time.time() - start_time < duration:
+            raw_data = self.comm.receive()
+            if not raw_data:
+                continue
+                
+            # 패턴 추출
+            self.extract_patterns(raw_data)
+            
+        # 결과 출력
+        self.print_patterns()
+        
+    def extract_patterns(self, data):
+        """패킷 패턴 추출"""
+        if len(data) < 4:
+            return
+            
+        # 헤더 패턴
+        header = data[1]
+        pattern_key = f"0x{header:02X}"
+        
+        if pattern_key not in self.patterns:
+            self.patterns[pattern_key] = {
+                'count': 0,
+                'lengths': set(),
+                'types': set(),
+                'samples': []
+            }
+            
+        self.patterns[pattern_key]['count'] += 1
+        self.patterns[pattern_key]['lengths'].add(len(data))
+        
+        if len(data) > 3:
+            self.patterns[pattern_key]['types'].add(data[3])
+            
+        # 샘플 저장 (최대 3개)
+        if len(self.patterns[pattern_key]['samples']) < 3:
+            hex_str = ' '.join(f'{b:02X}' for b in data)
+            self.patterns[pattern_key]['samples'].append(hex_str)
+            
+    def print_patterns(self):
+        """패턴 분석 결과 출력"""
+        print("\n=== 패킷 패턴 분석 결과 ===\n")
+        
+        for header, info in sorted(self.patterns.items()):
+            print(f"헤더 {header}:")
+            print(f"  발생 횟수: {info['count']}")
+            print(f"  패킷 길이: {sorted(info['lengths'])}")
+            print(f"  패킷 타입: {[f'0x{t:02X}' for t in sorted(info['types'])]}")
+            print(f"  샘플:")
+            for sample in info['samples']:
+                print(f"    {sample}")
+            print()
+
+# 실행
+analyzer = PatternAnalyzer("192.168.0.27:8899")
+analyzer.analyze(duration=30)
+```
+
+### 트러블슈팅: 실시간 분석 문제 해결
+
+#### 문제: 패킷이 수신되지 않음
+```python
+# 연결 테스트 스크립트
+def test_connection(conn_str):
+    comm = Communicator(conn_str)
+    try:
+        comm.connect()
+        print("✅ 연결 성공")
+        
+        # 5초간 수신 테스트
+        print("패킷 수신 대기중...")
+        for _ in range(50):
+            data = comm.receive()
+            if data:
+                print(f"✅ 패킷 수신: {len(data)} bytes")
+                return True
+            time.sleep(0.1)
+            
+        print("❌ 패킷이 수신되지 않습니다")
+        return False
+        
+    except Exception as e:
+        print(f"❌ 연결 실패: {e}")
+        return False
+
+test_connection("192.168.0.27:8899")
+```
+
+#### 문제: 패킷 손실
+```python
+# 버퍼 크기 조정
+class ImprovedCommunicator(Communicator):
+    def __init__(self, conn_str):
+        super().__init__(conn_str)
+        self.chunk_size = 4096  # 버퍼 크기 증가
+        
+    def _connect_socket(self):
+        super()._connect_socket()
+        # 소켓 버퍼 크기 조정
+        self.connection.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_RCVBUF,
+            65536
+        )
+```
+
+#### 문제: 디코딩 오류
+```python
+# 안전한 패킷 디코딩
+def safe_decode(data):
+    try:
+        # 기본 파싱
+        parsed = DevicePacketParser(packet).parse()
+        return parsed
+    except Exception as e:
+        # 오류 시 로우 데이터 반환
+        return {
+            'error': str(e),
+            'raw': data.hex(),
+            'length': len(data)
+        }
+```
+
+### 실전 예제: 스마트홈 대시보드
+
+```python
+# dashboard.py
+from datetime import datetime
+import json
+
+class SmartHomeDashboard:
+    def __init__(self, connection_string):
+        self.comm = Communicator(connection_string)
+        self.state = {
+            'thermostats': {},
+            'lights': {},
+            'power': {},
+            'last_update': None
+        }
+        
+    async def run(self):
+        """대시보드 실행"""
+        self.comm.connect()
+        
+        while True:
+            raw_data = self.comm.receive()
+            if raw_data:
+                self.update_state(raw_data)
+                self.display_dashboard()
+                
+            await asyncio.sleep(0.1)
+            
+    def update_state(self, raw_data):
+        """상태 업데이트"""
+        packets = PacketParser.parse(raw_data)
+        
+        for packet in packets:
+            device_data = DevicePacketParser(packet).parse()
+            if not device_data:
+                continue
+                
+            device_type = packet.device_type.value
+            
+            if device_type == "thermostat":
+                self.state['thermostats'][device_data.room_id] = {
+                    'temp': device_data.device_state['cur_temp'],
+                    'set': device_data.device_state['set_temp'],
+                    'on': device_data.device_state['state']
+                }
+            # ... 다른 디바이스 처리
+            
+        self.state['last_update'] = datetime.now().isoformat()
+        
+    def display_dashboard(self):
+        """대시보드 표시"""
+        import os
+        os.system('cls' if os.name == 'nt' else 'clear')
+        
+        print("=" * 60)
+        print("        BESTIN 스마트홈 실시간 대시보드")
+        print("=" * 60)
+        print(f"마지막 업데이트: {self.state['last_update']}")
+        print()
+        
+        # 난방 상태
+        print("🌡️  난방 상태:")
+        for room, data in self.state['thermostats'].items():
+            status = "ON " if data['on'] else "OFF"
+            print(f"  방 {room}: [{status}] "
+                  f"현재 {data['temp']}°C / 설정 {data['set']}°C")
+        
+        # JSON 저장 (API 연동용)
+        with open('dashboard_state.json', 'w') as f:
+            json.dump(self.state, f, indent=2)
+
+# 실행
+dashboard = SmartHomeDashboard("192.168.0.27:8899")
+asyncio.run(dashboard.run())
+```
+
+### 추가 팁
+
+1. **로그 레벨 조정**: 디버깅 시 `logging.DEBUG`, 운영 시 `logging.INFO`
+2. **타임아웃 설정**: 느린 네트워크에서는 타임아웃 값 증가
+3. **병렬 처리**: 여러 월패드 동시 모니터링 시 asyncio 활용
+4. **데이터 저장**: SQLite나 InfluxDB 활용하여 시계열 데이터 저장
+5. **알림 설정**: 특정 조건 발생 시 푸시 알림이나 이메일 전송
+
+---
