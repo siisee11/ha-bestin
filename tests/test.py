@@ -403,137 +403,196 @@ class DevicePacketParser:
 
     def parse_ec(self) -> list[DevicePacket]:
         """Parse the packet data for EC devices (Light/Outlet)."""
-        device_packets = []
         header = self.data[1]
         
         # Determine gateway type
         if 0x50 <= header <= 0x5F:
             # AIO Gateway
-            gateway_type = "aio"
             room_id = header - 0x50
+            return self.parse_ec_aio(room_id)
         elif 0x30 <= header <= 0x3F:
             # Gen2 Gateway
-            gateway_type = "gen2"
             room_id = header - 0x30
+            return self.parse_ec_gen2(room_id)
         elif header == 0x31:
-            # General Gateway - room ID is in data
-            gateway_type = "general"
-            room_id = None
+            # General Gateway
+            return self.parse_ec_general()
         else:
             # Check for other EC conditions
             if (header & 0xF0 in [0x30, 0x50]) and (header & 0x0F in range(1, 7) or header & 0x0F == 0xF):
-                gateway_type = "general"
-                room_id = None
+                return self.parse_ec_general()
             else:
                 logging.warning(f"Unknown EC packet header: {header:#04x}")
-                return device_packets
+                return []
+
+    def parse_ec_aio(self, room_id: int) -> list[DevicePacket]:
+        """Parse EC packet for AIO Gateway."""
+        device_packets = []
         
-        # Parse based on packet type (Response packets only contain state data)
         if self.packet_type == PacketType.RES:
-            if gateway_type in ["aio", "gen2"]:
-                # Parse AIO/Gen2 response packet
-                if len(self.data) < 12:
-                    return device_packets
+            if len(self.data) < 12:
+                return device_packets
+            
+            # Extract device counts
+            light_count = self.data[10] & 0x0F
+            outlet_count = self.data[11] if len(self.data) > 11 else 0
+            
+            # Starting position for device data
+            data_pos = 12
+            
+            # Parse light states (13 bytes per light)
+            for i in range(light_count):
+                if data_pos + 13 > len(self.data):
+                    break
                 
-                # Extract device counts
-                light_count = self.data[10] & 0x0F
-                outlet_count = self.data[11] if len(self.data) > 11 else 0
+                light_state = {
+                    "state": bool(self.data[data_pos]),
+                    "brightness": self.data[data_pos + 1],  # 0-255
+                    "color_temp": self.data[data_pos + 2],  # 0-255
+                }
                 
-                # Starting position for device data
-                data_pos = 12
+                device_packets.append(DevicePacket(
+                    trans_key="light",
+                    room_id=room_id,
+                    sub_id=f"light_{i}",
+                    device_state=light_state
+                ))
+                data_pos += 13
+            
+            # Parse outlet states (14 bytes per outlet)
+            for i in range(outlet_count):
+                if data_pos + 14 > len(self.data):
+                    break
                 
-                # Parse light states (13 bytes per light)
-                for i in range(light_count):
-                    if data_pos + 13 > len(self.data):
-                        break
-                    
-                    light_state = {
-                        "state": bool(self.data[data_pos]),
-                        "brightness": self.data[data_pos + 1],  # 0-255
-                        "color_temp": self.data[data_pos + 2],  # 0-255
-                    }
-                    
-                    device_packets.append(DevicePacket(
-                        trans_key="light",
-                        room_id=room_id,
-                        sub_id=f"light_{i}",
-                        device_state=light_state
-                    ))
-                    data_pos += 13
+                outlet_state = {
+                    "state": self.data[data_pos] == 0x21,  # 0x21=ON, 0x20=OFF
+                    "power_usage": int.from_bytes(
+                        self.data[data_pos + 8:data_pos + 10], byteorder='big'
+                    ) / 10.0  # W
+                }
                 
-                # Parse outlet states (14 bytes per outlet)
-                for i in range(outlet_count):
-                    if data_pos + 14 > len(self.data):
-                        break
-                    
-                    outlet_state = {
-                        "state": self.data[data_pos] == 0x21,  # 0x21=ON, 0x20=OFF
-                        "power_usage": int.from_bytes(
-                            self.data[data_pos + 8:data_pos + 10], byteorder='big'
-                        ) / 10.0  # W
-                    }
-                    
-                    device_packets.append(DevicePacket(
-                        trans_key="outlet",
-                        room_id=room_id,
-                        sub_id=f"outlet_{i}",
-                        device_state=outlet_state
-                    ))
-                    data_pos += 14
-                    
-            elif gateway_type == "general":
-                # Parse General gateway response packet
-                if len(self.data) < 11:
-                    return device_packets
+                device_packets.append(DevicePacket(
+                    trans_key="outlet",
+                    room_id=room_id,
+                    sub_id=f"outlet_{i}",
+                    device_state=outlet_state
+                ))
+                data_pos += 14
+        
+        return device_packets
+
+    def parse_ec_gen2(self, room_id: int) -> list[DevicePacket]:
+        """Parse EC packet for Gen2 Gateway."""
+        device_packets = []
+        
+        if self.packet_type == PacketType.RES:
+            if len(self.data) < 12:
+                return device_packets
+            
+            # Extract device counts
+            light_count = self.data[10] & 0x0F
+            outlet_count = self.data[11] if len(self.data) > 11 else 0
+            
+            # Starting position for device data
+            data_pos = 12
+            
+            # Parse light states (13 bytes per light)
+            for i in range(light_count):
+                if data_pos + 13 > len(self.data):
+                    break
                 
-                # Room ID is in the data for general gateway
-                room_id = self.data[5] & 0x0F
+                light_state = {
+                    "state": bool(self.data[data_pos]),
+                    "brightness": self.data[data_pos + 1],  # 0-255
+                    "color_temp": self.data[data_pos + 2],  # 0-255
+                }
                 
-                # Extract device counts
-                light_count = self.data[10] & 0x0F if len(self.data) > 10 else 0
-                outlet_count = self.data[11] if len(self.data) > 11 else 0
+                device_packets.append(DevicePacket(
+                    trans_key="light",
+                    room_id=room_id,
+                    sub_id=f"light_{i}",
+                    device_state=light_state
+                ))
+                data_pos += 13
+            
+            # Parse outlet states (14 bytes per outlet)
+            for i in range(outlet_count):
+                if data_pos + 14 > len(self.data):
+                    break
                 
-                # Starting position for device data
-                data_pos = 12
+                outlet_state = {
+                    "state": self.data[data_pos] == 0x21,  # 0x21=ON, 0x20=OFF
+                    "power_usage": int.from_bytes(
+                        self.data[data_pos + 8:data_pos + 10], byteorder='big'
+                    ) / 10.0  # W
+                }
                 
-                # Parse light states (13 bytes per light)
-                for i in range(light_count):
-                    if data_pos + 13 > len(self.data):
-                        break
-                    
-                    light_state = {
-                        "state": bool(self.data[data_pos]),
-                        "brightness": self.data[data_pos + 1],  # 0-255
-                        "color_temp": self.data[data_pos + 2],  # 0-255 (mapped to 3000K-5700K)
-                    }
-                    
-                    device_packets.append(DevicePacket(
-                        trans_key="light",
-                        room_id=room_id,
-                        sub_id=f"light_{i}",
-                        device_state=light_state
-                    ))
-                    data_pos += 13
+                device_packets.append(DevicePacket(
+                    trans_key="outlet",
+                    room_id=room_id,
+                    sub_id=f"outlet_{i}",
+                    device_state=outlet_state
+                ))
+                data_pos += 14
+        
+        return device_packets
+
+    def parse_ec_general(self) -> list[DevicePacket]:
+        """Parse EC packet for General Gateway."""
+        device_packets = []
+        
+        if self.packet_type == PacketType.RES:
+            if len(self.data) < 11:
+                return device_packets
+            
+            # Room ID is in the data for general gateway
+            room_id = self.data[5] & 0x0F
+            
+            # Extract device counts
+            light_count = self.data[10] & 0x0F if len(self.data) > 10 else 0
+            outlet_count = self.data[11] if len(self.data) > 11 else 0
+            
+            # Starting position for device data
+            data_pos = 12
+            
+            # Parse light states (13 bytes per light)
+            for i in range(light_count):
+                if data_pos + 13 > len(self.data):
+                    break
                 
-                # Parse outlet states (14 bytes per outlet)
-                for i in range(outlet_count):
-                    if data_pos + 14 > len(self.data):
-                        break
-                    
-                    outlet_state = {
-                        "state": self.data[data_pos] == 0x21,  # 0x21=ON, 0x20=OFF
-                        "power_usage": int.from_bytes(
-                            self.data[data_pos + 8:data_pos + 10], byteorder='big'
-                        ) / 10.0  # W
-                    }
-                    
-                    device_packets.append(DevicePacket(
-                        trans_key="outlet",
-                        room_id=room_id,
-                        sub_id=f"outlet_{i}",
-                        device_state=outlet_state
-                    ))
-                    data_pos += 14
+                light_state = {
+                    "state": bool(self.data[data_pos]),
+                    "brightness": self.data[data_pos + 1],  # 0-255
+                    "color_temp": self.data[data_pos + 2],  # 0-255 (mapped to 3000K-5700K)
+                }
+                
+                device_packets.append(DevicePacket(
+                    trans_key="light",
+                    room_id=room_id,
+                    sub_id=f"light_{i}",
+                    device_state=light_state
+                ))
+                data_pos += 13
+            
+            # Parse outlet states (14 bytes per outlet)
+            for i in range(outlet_count):
+                if data_pos + 14 > len(self.data):
+                    break
+                
+                outlet_state = {
+                    "state": self.data[data_pos] == 0x21,  # 0x21=ON, 0x20=OFF
+                    "power_usage": int.from_bytes(
+                        self.data[data_pos + 8:data_pos + 10], byteorder='big'
+                    ) / 10.0  # W
+                }
+                
+                device_packets.append(DevicePacket(
+                    trans_key="outlet",
+                    room_id=room_id,
+                    sub_id=f"outlet_{i}",
+                    device_state=outlet_state
+                ))
+                data_pos += 14
         
         return device_packets
 
